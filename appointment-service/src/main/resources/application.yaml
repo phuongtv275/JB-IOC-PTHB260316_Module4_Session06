@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: appointment-service
+  datasource:
+    url: jdbc:postgresql://localhost:5432/appointment_db
+    username: ${POSTGRES_USER:rikkei}
+    password: ${POSTGRES_PASSWORD:rikkei}
+  jpa:
+    hibernate:
+      ddl-auto: update
+server:
+  port: 8083
+
+eureka:
+  client:
+    register-with-eureka: true
+    fetch-registry: true
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [cid:%X{correlationId:-N/A}] %logger{36} - %msg%n"
+  level:
+    com.example.appointmentservice: DEBUG
