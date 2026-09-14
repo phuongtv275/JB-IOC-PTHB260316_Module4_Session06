@@ -48,7 +48,7 @@ flowchart TD
 
     %% Inter-service communication
     AppointmentSvc ==>|RestTemplate @LoadBalanced| PatientSvc
-    AppointmentSvc ==>|RestTemplate @LoadBalanced<br/>(Try-Catch Resilience)| DoctorSvc
+    AppointmentSvc ==>|RestTemplate @LoadBalanced<br/> Try-Catch Resilience| DoctorSvc
 
     %% Databases
     PatientSvc --> PatientDB
