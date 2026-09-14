@@ -1,12 +1,12 @@
 package com.example.appointmentservice.service.impl;
 
-import com.example.appointmentservice.client.MedicalServiceClient;
 import com.example.appointmentservice.dto.request.AppointmentRequest;
 import com.example.appointmentservice.dto.response.AppointmentResponse;
 import com.example.appointmentservice.dto.response.PageResponse;
 import com.example.appointmentservice.entity.Appointment;
 import com.example.appointmentservice.exception.BadRequestException;
 import com.example.appointmentservice.exception.ResourceNotFoundException;
+import com.example.appointmentservice.exception.ServiceUnavailableException;
 import com.example.appointmentservice.mapper.AppointmentMapper;
 import com.example.appointmentservice.repository.AppointmentRepository;
 import com.example.appointmentservice.service.AppointmentService;
@@ -18,9 +18,12 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.RestTemplate;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -37,7 +40,10 @@ public class AppointmentServiceImpl implements AppointmentService {
 
     private final AppointmentRepository appointmentRepository;
     private final AppointmentMapper appointmentMapper;
-    private final MedicalServiceClient medicalServiceClient;
+    private final RestTemplate restTemplate;
+
+    private static final String PATIENT_SERVICE_URL = "http://patient-service/api/v1/patients/{id}";
+    private static final String DOCTOR_SERVICE_URL = "http://doctor-service/api/v1/doctors/{id}";
 
     /**
      * Danh sách các trường cho phép sắp xếp nhằm đảm bảo an toàn truy vấn.
@@ -50,13 +56,14 @@ public class AppointmentServiceImpl implements AppointmentService {
      * Tạo mới lịch khám bệnh.
      * 
      * Logic nghiệp vụ:
-     * 1. Gọi RestTemplate (@LoadBalanced) tới 'patient-service' qua Eureka để kiểm tra sự tồn tại của patientId.
-     * 2. Gọi RestTemplate (@LoadBalanced) tới 'doctor-service' qua Eureka để kiểm tra sự tồn tại của doctorId.
-     * 3. Nếu một trong hai bên không tồn tại, ném ngoại lệ ResourceNotFoundException (trả về HTTP 404).
-     * 4. Chuyển đổi DTO sang Entity qua MapStruct.
-     * 5. Đặt trạng thái mặc định là "PENDING" nếu client chưa chỉ định.
-     * 6. Lưu vào cơ sở dữ liệu và chuyển đổi sang DTO phản hồi.
-     * 7. Ghi log đầy đủ thông tin để phục vụ tracing và debug.
+     * 1. Bọc khối try-catch quanh lệnh gọi sang Patient-Service (RestTemplate @LoadBalanced).
+     * 2. Bọc khối try-catch quanh lệnh gọi sang Doctor-Service (RestTemplate @LoadBalanced).
+     *    - Nếu Bác sĩ không tồn tại (HTTP 404): ném ResourceNotFoundException.
+     *    - Nếu Doctor-Service bị sập (lỗi mạng, server crash, 5xx): catch Exception và ném ServiceUnavailableException
+     *      với thông điệp: "Hệ thống quản lý bác sĩ hiện không khả dụng. Vui lòng đặt lịch sau!".
+     * 3. Chuyển đổi DTO sang Entity qua MapStruct.
+     * 4. Thiết lập trạng thái mặc định "PENDING".
+     * 5. Lưu vào CSDL và trả về DTO.
      */
     @Override
     @Transactional
@@ -64,11 +71,52 @@ public class AppointmentServiceImpl implements AppointmentService {
         log.info("[APPOINTMENT-SERVICE] Bắt đầu xử lý tạo lịch khám: patientId={}, doctorId={}, date={}",
                 request.getPatientId(), request.getDoctorId(), request.getAppointmentDate());
 
-        // 1. Kiểm tra sự tồn tại của Bệnh nhân trên Patient-Service
-        medicalServiceClient.validatePatientExists(request.getPatientId());
+        // 1. Kiểm tra sự tồn tại của Bệnh nhân trên Patient-Service (sử dụng khối try-catch)
+        try {
+            log.info("[APPOINTMENT-SERVICE] Kiểm tra sự tồn tại của bệnh nhân ID: {}", request.getPatientId());
+            ResponseEntity<String> patientResponse = restTemplate.getForEntity(
+                    PATIENT_SERVICE_URL,
+                    String.class,
+                    request.getPatientId()
+            );
+            if (!patientResponse.getStatusCode().is2xxSuccessful()) {
+                throw new ResourceNotFoundException(String.format("Không tìm thấy bệnh nhân với ID: %d trong hệ thống", request.getPatientId()));
+            }
+        } catch (HttpClientErrorException.NotFound ex) {
+            log.warn("[APPOINTMENT-SERVICE] Bệnh nhân ID: {} không tồn tại trong hệ thống (404)", request.getPatientId());
+            throw new ResourceNotFoundException(String.format("Không tìm thấy bệnh nhân với ID: %d trong hệ thống", request.getPatientId()));
+        } catch (HttpClientErrorException ex) {
+            throw new ResourceNotFoundException(String.format("Không tìm thấy bệnh nhân với ID: %d trong hệ thống", request.getPatientId()));
+        } catch (ResourceNotFoundException ex) {
+            throw ex;
+        } catch (Exception ex) {
+            log.error("[APPOINTMENT-SERVICE] Patient-Service bị sập hoặc gặp sự cố: {}", ex.getMessage());
+            throw new ServiceUnavailableException("Hệ thống quản lý bệnh nhân hiện không khả dụng. Vui lòng đặt lịch sau!");
+        }
 
-        // 2. Kiểm tra sự tồn tại của Bác sĩ trên Doctor-Service
-        medicalServiceClient.validateDoctorExists(request.getDoctorId());
+        // 2. Kiểm tra sự tồn tại của Bác sĩ trên Doctor-Service (sử dụng khối try-catch)
+        try {
+            log.info("[APPOINTMENT-SERVICE] Kiểm tra sự tồn tại của bác sĩ ID: {}", request.getDoctorId());
+            ResponseEntity<String> doctorResponse = restTemplate.getForEntity(
+                    DOCTOR_SERVICE_URL,
+                    String.class,
+                    request.getDoctorId()
+            );
+            if (!doctorResponse.getStatusCode().is2xxSuccessful()) {
+                throw new ResourceNotFoundException(String.format("Không tìm thấy bác sĩ với ID: %d trong hệ thống", request.getDoctorId()));
+            }
+        } catch (HttpClientErrorException.NotFound ex) {
+            log.warn("[APPOINTMENT-SERVICE] Bác sĩ ID: {} không tồn tại trong hệ thống (404)", request.getDoctorId());
+            throw new ResourceNotFoundException(String.format("Không tìm thấy bác sĩ với ID: %d trong hệ thống", request.getDoctorId()));
+        } catch (HttpClientErrorException ex) {
+            throw new ResourceNotFoundException(String.format("Không tìm thấy bác sĩ với ID: %d trong hệ thống", request.getDoctorId()));
+        } catch (ResourceNotFoundException ex) {
+            throw ex;
+        } catch (Exception ex) {
+            // Khi Doctor-Service bị sập, server lỗi hoặc không kết nối được
+            log.error("[APPOINTMENT-SERVICE] Doctor-Service bị sập do sự cố server: {}", ex.getMessage());
+            throw new ServiceUnavailableException("Hệ thống quản lý bác sĩ hiện không khả dụng. Vui lòng đặt lịch sau!");
+        }
 
         // 3. Ánh xạ DTO sang Entity
         Appointment appointment = appointmentMapper.toEntity(request);
@@ -117,7 +165,6 @@ public class AppointmentServiceImpl implements AppointmentService {
         Sort sort = Sort.by(direction, sortBy);
         Pageable pageable = PageRequest.of(page, size, sort);
 
-        // Xây dựng JPA Specification lọc động
         Specification<Appointment> spec = (root, query, cb) -> {
             List<Predicate> predicates = new ArrayList<>();
 

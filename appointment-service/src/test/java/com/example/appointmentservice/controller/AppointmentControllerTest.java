@@ -5,6 +5,7 @@ import com.example.appointmentservice.dto.response.AppointmentResponse;
 import com.example.appointmentservice.dto.response.PageResponse;
 import com.example.appointmentservice.exception.GlobalExceptionHandler;
 import com.example.appointmentservice.exception.ResourceNotFoundException;
+import com.example.appointmentservice.exception.ServiceUnavailableException;
 import com.example.appointmentservice.filter.CorrelationIdFilter;
 import com.example.appointmentservice.service.AppointmentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -84,6 +85,30 @@ class AppointmentControllerTest {
                 .andExpect(jsonPath("$.data.patientId", is(1)))
                 .andExpect(jsonPath("$.data.doctorId", is(2)))
                 .andExpect(jsonPath("$.data.status", is("PENDING")));
+    }
+
+    @Test
+    @DisplayName("POST /api/v1/appointments - Khi Doctor-Service bị sập, trả về 503 kèm đối tượng ApiResponseError")
+    void createAppointment_DoctorServiceDown_Returns503ApiResponseError() throws Exception {
+        AppointmentRequest request = AppointmentRequest.builder()
+                .patientId(1L)
+                .doctorId(2L)
+                .appointmentDate(LocalDateTime.now().plusDays(3))
+                .reason("Tái khám")
+                .build();
+
+        when(appointmentService.createAppointment(any(AppointmentRequest.class)))
+                .thenThrow(new ServiceUnavailableException("Hệ thống quản lý bác sĩ hiện không khả dụng. Vui lòng đặt lịch sau!"));
+
+        mockMvc.perform(post("/api/v1/appointments")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andDo(print())
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.status", is(503)))
+                .andExpect(jsonPath("$.error", is("Service Unavailable")))
+                .andExpect(jsonPath("$.message", is("Hệ thống quản lý bác sĩ hiện không khả dụng. Vui lòng đặt lịch sau!")))
+                .andExpect(jsonPath("$.timestamp", notNullValue()));
     }
 
     @Test

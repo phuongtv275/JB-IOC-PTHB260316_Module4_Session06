@@ -93,15 +93,29 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * Xử lý lỗi service khác không khả dụng (HTTP 503)
+     * Xử lý lỗi service khác không khả dụng (HTTP 503) khi liên dịch vụ gặp sự cố (Service sập).
+     * Trả về định dạng ApiResponseError theo đúng yêu cầu:
+     * {
+     *   "timestamp": "...",
+     *   "status": 503,
+     *   "error": "Service Unavailable",
+     *   "message": "Hệ thống quản lý bác sĩ hiện không khả dụng. Vui lòng đặt lịch sau!"
+     * }
      */
     @ExceptionHandler(ServiceUnavailableException.class)
-    public ResponseEntity<ApiResponse<Object>> handleServiceUnavailableException(ServiceUnavailableException ex) {
+    public ResponseEntity<com.example.appointmentservice.dto.response.ApiResponseError> handleServiceUnavailableException(ServiceUnavailableException ex) {
         String correlationId = getCorrelationId();
-        log.error("[SERVICE-UNAVAILABLE] [cid:{}] {}", correlationId, ex.getMessage());
+        log.error("[SERVICE-UNAVAILABLE] [cid:{}] Service sập hoặc không khả dụng: {}", correlationId, ex.getMessage());
 
-        ApiResponse<Object> response = ApiResponse.error(ex.getMessage(), null, correlationId);
-        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(response);
+        com.example.appointmentservice.dto.response.ApiResponseError errorResponse =
+                com.example.appointmentservice.dto.response.ApiResponseError.builder()
+                        .timestamp(java.time.LocalDateTime.now())
+                        .status(HttpStatus.SERVICE_UNAVAILABLE.value())
+                        .error(HttpStatus.SERVICE_UNAVAILABLE.getReasonPhrase())
+                        .message(ex.getMessage())
+                        .build();
+
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(errorResponse);
     }
 
     /**

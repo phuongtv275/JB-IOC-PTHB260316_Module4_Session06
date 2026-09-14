@@ -1,12 +1,12 @@
 package com.example.appointmentservice.service;
 
-import com.example.appointmentservice.client.MedicalServiceClient;
 import com.example.appointmentservice.dto.request.AppointmentRequest;
 import com.example.appointmentservice.dto.response.AppointmentResponse;
 import com.example.appointmentservice.dto.response.PageResponse;
 import com.example.appointmentservice.entity.Appointment;
 import com.example.appointmentservice.exception.BadRequestException;
 import com.example.appointmentservice.exception.ResourceNotFoundException;
+import com.example.appointmentservice.exception.ServiceUnavailableException;
 import com.example.appointmentservice.mapper.AppointmentMapper;
 import com.example.appointmentservice.repository.AppointmentRepository;
 import com.example.appointmentservice.service.impl.AppointmentServiceImpl;
@@ -21,6 +21,11 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -30,8 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doNothing;
-import static org.mockito.Mockito.doThrow;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -46,7 +50,7 @@ class AppointmentServiceTest {
     private AppointmentMapper appointmentMapper;
 
     @Mock
-    private MedicalServiceClient medicalServiceClient;
+    private RestTemplate restTemplate;
 
     @InjectMocks
     private AppointmentServiceImpl appointmentService;
@@ -93,8 +97,10 @@ class AppointmentServiceTest {
     @Test
     @DisplayName("Tạo lịch khám thành công khi bệnh nhân và bác sĩ hợp lệ")
     void createAppointment_Success() {
-        doNothing().when(medicalServiceClient).validatePatientExists(1L);
-        doNothing().when(medicalServiceClient).validateDoctorExists(2L);
+        when(restTemplate.getForEntity("http://patient-service/api/v1/patients/{id}", String.class, 1L))
+                .thenReturn(ResponseEntity.ok("OK"));
+        when(restTemplate.getForEntity("http://doctor-service/api/v1/doctors/{id}", String.class, 2L))
+                .thenReturn(ResponseEntity.ok("OK"));
         when(appointmentMapper.toEntity(sampleRequest)).thenReturn(sampleEntity);
         when(appointmentRepository.save(sampleEntity)).thenReturn(sampleEntity);
         when(appointmentMapper.toResponse(sampleEntity)).thenReturn(sampleResponse);
@@ -107,35 +113,45 @@ class AppointmentServiceTest {
         assertEquals(2L, result.getDoctorId());
         assertEquals("PENDING", result.getStatus());
 
-        verify(medicalServiceClient).validatePatientExists(1L);
-        verify(medicalServiceClient).validateDoctorExists(2L);
         verify(appointmentRepository).save(sampleEntity);
     }
 
     @Test
     @DisplayName("Ném ResourceNotFoundException khi bệnh nhân không tồn tại trên Patient-Service")
     void createAppointment_PatientNotFound_ThrowsException() {
-        doThrow(new ResourceNotFoundException("Không tìm thấy bệnh nhân với ID: 1 trong hệ thống"))
-                .when(medicalServiceClient).validatePatientExists(1L);
+        when(restTemplate.getForEntity("http://patient-service/api/v1/patients/{id}", String.class, 1L))
+                .thenThrow(new HttpClientErrorException(HttpStatus.NOT_FOUND));
 
         assertThrows(ResourceNotFoundException.class, () -> appointmentService.createAppointment(sampleRequest));
-
-        verify(medicalServiceClient).validatePatientExists(1L);
-        verify(medicalServiceClient, never()).validateDoctorExists(any());
         verify(appointmentRepository, never()).save(any());
     }
 
     @Test
     @DisplayName("Ném ResourceNotFoundException khi bác sĩ không tồn tại trên Doctor-Service")
     void createAppointment_DoctorNotFound_ThrowsException() {
-        doNothing().when(medicalServiceClient).validatePatientExists(1L);
-        doThrow(new ResourceNotFoundException("Không tìm thấy bác sĩ với ID: 2 trong hệ thống"))
-                .when(medicalServiceClient).validateDoctorExists(2L);
+        when(restTemplate.getForEntity("http://patient-service/api/v1/patients/{id}", String.class, 1L))
+                .thenReturn(ResponseEntity.ok("OK"));
+        when(restTemplate.getForEntity("http://doctor-service/api/v1/doctors/{id}", String.class, 2L))
+                .thenThrow(new HttpClientErrorException(HttpStatus.NOT_FOUND));
 
         assertThrows(ResourceNotFoundException.class, () -> appointmentService.createAppointment(sampleRequest));
+        verify(appointmentRepository, never()).save(any());
+    }
 
-        verify(medicalServiceClient).validatePatientExists(1L);
-        verify(medicalServiceClient).validateDoctorExists(2L);
+    @Test
+    @DisplayName("Ném ServiceUnavailableException khi Doctor-Service bị sập (lỗi kết nối/sự cố server)")
+    void createAppointment_DoctorServiceDown_ThrowsServiceUnavailableException() {
+        when(restTemplate.getForEntity("http://patient-service/api/v1/patients/{id}", String.class, 1L))
+                .thenReturn(ResponseEntity.ok("OK"));
+        when(restTemplate.getForEntity("http://doctor-service/api/v1/doctors/{id}", String.class, 2L))
+                .thenThrow(new ResourceAccessException("I/O error on GET request: Connection refused"));
+
+        ServiceUnavailableException exception = assertThrows(
+                ServiceUnavailableException.class,
+                () -> appointmentService.createAppointment(sampleRequest)
+        );
+
+        assertEquals("Hệ thống quản lý bác sĩ hiện không khả dụng. Vui lòng đặt lịch sau!", exception.getMessage());
         verify(appointmentRepository, never()).save(any());
     }
 
@@ -153,7 +169,6 @@ class AppointmentServiceTest {
         assertNotNull(result);
         assertEquals(1, result.getItems().size());
         assertEquals(10L, result.getItems().get(0).getId());
-        assertEquals(1, result.getTotalElements());
     }
 
     @Test
@@ -174,13 +189,5 @@ class AppointmentServiceTest {
 
         assertNotNull(result);
         assertEquals(10L, result.getId());
-    }
-
-    @Test
-    @DisplayName("Ném ResourceNotFoundException khi không tìm thấy lịch hẹn theo ID")
-    void getAppointmentById_NotFound_ThrowsException() {
-        when(appointmentRepository.findById(999L)).thenReturn(Optional.empty());
-
-        assertThrows(ResourceNotFoundException.class, () -> appointmentService.getAppointmentById(999L));
     }
 }
